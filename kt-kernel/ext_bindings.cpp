@@ -71,6 +71,9 @@ static const bool _is_plain_ = false;
 #include "operators/llamafile/mla.hpp"
 #include "operators/llamafile/mlp.h"
 #include "operators/llamafile/moe.hpp"
+#if defined(USE_PAGEDMOE)
+#include "operators/pagedmoe/moe.hpp"
+#endif
 #include "pybind11/pybind11.h"
 
 namespace py = pybind11;
@@ -473,13 +476,98 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
   }
 }
 
+#if defined(USE_PAGEDMOE)
+class PagedMoeBindings {
+ public:
+  class WarmUpBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      PAGEDMOE_MOE* moe;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&PAGEDMOE_MOE::warm_up, args_->moe);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<PAGEDMOE_MOE> moe) {
+      Args* args = new Args{nullptr, moe.get()};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+
+  class LoadWeightsBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      PAGEDMOE_MOE* moe;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&PAGEDMOE_MOE::load_weights, args_->moe);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<PAGEDMOE_MOE> moe) {
+      Args* args = new Args{nullptr, moe.get()};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+
+  class ForwardBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      PAGEDMOE_MOE* moe;
+      intptr_t qlen;
+      int k;
+      intptr_t expert_ids;
+      intptr_t weights;
+      intptr_t input;
+      intptr_t output;
+      bool incremental;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&PAGEDMOE_MOE::forward_binding, args_->moe, args_->qlen, args_->k, args_->expert_ids,
+                               args_->weights, args_->input, args_->output, args_->incremental);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<PAGEDMOE_MOE> moe, intptr_t qlen, int k,
+                                                            intptr_t expert_ids, intptr_t weights, intptr_t input,
+                                                            intptr_t output, bool incremental = false) {
+      Args* args = new Args{nullptr, moe.get(), qlen, k, expert_ids, weights, input, output, incremental};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<PAGEDMOE_MOE> moe, intptr_t qlen, int k,
+                                                            intptr_t expert_ids, intptr_t weights, intptr_t input,
+                                                            intptr_t output) {
+      return cpuinfer_interface(moe, qlen, k, expert_ids, weights, input, output, false);
+    }
+  };
+};
+
+void bind_pagedmoe_module(py::module_& moe_module) {
+  py::class_<PAGEDMOE_MOE, MoE_Interface, std::shared_ptr<PAGEDMOE_MOE>>(moe_module, "PagedMoe_MOE")
+      .def(py::init<GeneralMOEConfig>())
+      .def("warm_up_task", &PagedMoeBindings::WarmUpBindings::cpuinfer_interface)
+      .def("load_weights_task", &PagedMoeBindings::LoadWeightsBindings::cpuinfer_interface)
+      .def("forward_task",
+           py::overload_cast<std::shared_ptr<PAGEDMOE_MOE>, intptr_t, int, intptr_t, intptr_t, intptr_t, intptr_t>(
+               &PagedMoeBindings::ForwardBindings::cpuinfer_interface))
+      .def("forward_task",
+           py::overload_cast<std::shared_ptr<PAGEDMOE_MOE>, intptr_t, int, intptr_t, intptr_t, intptr_t, intptr_t, bool>(
+               &PagedMoeBindings::ForwardBindings::cpuinfer_interface))
+      .def("warm_up", &PAGEDMOE_MOE::warm_up)
+      .def("load_weights", &PAGEDMOE_MOE::load_weights)
+      .def("forward", &PAGEDMOE_MOE::forward_binding);
+}
+#endif
+
 PYBIND11_MODULE(kt_kernel_ext, m) {
   py::class_<WorkerPool>(m, "WorkerPool").def(py::init<int>());
   py::class_<WorkerPoolConfig>(m, "WorkerPoolConfig")
       .def(py::init<>())
       .def_readwrite("subpool_count", &WorkerPoolConfig::subpool_count)
       .def_readwrite("subpool_numa_map", &WorkerPoolConfig::subpool_numa_map)
-      .def_readwrite("subpool_thread_count", &WorkerPoolConfig::subpool_thread_count);
+      .def_readwrite("subpool_thread_count", &WorkerPoolConfig::subpool_thread_count)
+      .def_readwrite("create_worker_threads", &WorkerPoolConfig::create_worker_threads);
 
   py::class_<CPUInfer>(m, "CPUInfer")
       .def(py::init<int>())
@@ -754,6 +842,13 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("down_type", &GeneralMOEConfig::down_type)
       .def_readwrite("hidden_type", &GeneralMOEConfig::hidden_type)
       .def_readwrite("max_cache_depth", &GeneralMOEConfig::max_cache_depth)
+      .def_readwrite("pagedmoe_cache_size_bytes", &GeneralMOEConfig::pagedmoe_cache_size_bytes)
+      .def_readwrite("pagedmoe_codebook_workers", &GeneralMOEConfig::pagedmoe_codebook_workers)
+      .def_readwrite("pagedmoe_bitplane_workers", &GeneralMOEConfig::pagedmoe_bitplane_workers)
+      .def_readwrite("pagedmoe_compute_threads", &GeneralMOEConfig::pagedmoe_compute_threads)
+      .def_readwrite("pagedmoe_pin_compute_workers", &GeneralMOEConfig::pagedmoe_pin_compute_workers)
+      .def_readwrite("pagedmoe_num_layers", &GeneralMOEConfig::pagedmoe_num_layers)
+      .def_readwrite("pagedmoe_num_blocks", &GeneralMOEConfig::pagedmoe_num_blocks)
 
       ;
 
@@ -773,6 +868,10 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .DEF_PTR_PROPERTY(MOESFTConfig, down_lora_b);
 
   py::class_<MoE_Interface, std::shared_ptr<MoE_Interface>>(moe_module, "MoE_Interface");
+
+#if defined(USE_PAGEDMOE)
+  bind_pagedmoe_module(moe_module);
+#endif
 
   bind_moe_module<LLAMA_MOE_TP>(moe_module, "MOE");
 

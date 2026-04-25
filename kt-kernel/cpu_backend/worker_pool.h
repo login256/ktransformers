@@ -130,9 +130,10 @@ class NumaJobDistributor {
 };
 
 struct WorkerPoolConfig {
-  int subpool_count;
+  int subpool_count = 0;
   std::vector<int> subpool_numa_map;
   std::vector<int> subpool_thread_count;
+  bool create_worker_threads = true;
 };
 
 class WorkerPool {

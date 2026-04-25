@@ -25,6 +25,8 @@ Environment knobs (export before running pip install .):
   CPUINFER_ENABLE_AVX512_BF16=OFF ON/OFF -> -DLLAMA_AVX512_BF16
   CPUINFER_ENABLE_AVX512_VBMI=OFF ON/OFF -> -DLLAMA_AVX512_VBMI (required for FP8 MoE)
   CPUINFER_ENABLE_CPPTRACE=ON/OFF  ON/OFF -> -DKTRANSFORMERS_ENABLE_CPPTRACE (debug-only)
+  CPUINFER_ENABLE_PAGEDMOE=ON/OFF  ON/OFF -> -DKTRANSFORMERS_USE_PAGEDMOE
+  CPUINFER_PAGEDMOE_ROOT=/path     Forward to -DKTRANSFORMERS_PAGEDMOE_ROOT
   CPUINFER_BLIS_ROOT=/path/to/blis  Forward to -DBLIS_ROOT
 
 
@@ -612,6 +614,8 @@ class CMakeBuild(build_ext):
         _forward_str_env(cmake_args, "CPUINFER_LTO_JOBS", "CPUINFER_LTO_JOBS")
         _forward_str_env(cmake_args, "CPUINFER_LTO_MODE", "CPUINFER_LTO_MODE")
         _forward_bool_env(cmake_args, "CPUINFER_ENABLE_CPPTRACE", "KTRANSFORMERS_ENABLE_CPPTRACE")
+        _forward_bool_env(cmake_args, "CPUINFER_ENABLE_PAGEDMOE", "KTRANSFORMERS_USE_PAGEDMOE")
+        _forward_str_env(cmake_args, "CPUINFER_PAGEDMOE_ROOT", "KTRANSFORMERS_PAGEDMOE_ROOT")
 
         # CUDA static runtime toggle
         _forward_bool_env(cmake_args, "CPUINFER_CUDA_STATIC_RUNTIME", "KTRANSFORMERS_CUDA_STATIC_RUNTIME")

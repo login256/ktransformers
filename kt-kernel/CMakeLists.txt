@@ -25,6 +25,8 @@ option(KTRANSFORMERS_CPU_MLA "ktransformers: CPU use MLA" OFF)
 option(KTRANSFORMERS_CPU_MOE_KERNEL "ktransformers: CPU use moe kernel" OFF)
 option(KTRANSFORMERS_CPU_MOE_AMD "ktransformers: CPU use moe kernel for amd" OFF)
 option(KTRANSFORMERS_ENABLE_CPPTRACE "Enable native crash tracing in kt-kernel" OFF)
+option(KTRANSFORMERS_USE_PAGEDMOE "ktransformers: enable pagedmoe C ABI MoE backend" OFF)
+set(KTRANSFORMERS_PAGEDMOE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." CACHE PATH "Path to pagedmoe repository root")
 # LTO control
 option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
 
@@ -402,6 +404,24 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/pybind11 ${CMAKE_CUR
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
+if(KTRANSFORMERS_USE_PAGEDMOE)
+    set(PAGEDMOE_CAPI_INCLUDE_DIR "${KTRANSFORMERS_PAGEDMOE_ROOT}/src/pagedmoe-capi/include")
+    find_library(PAGEDMOE_CAPI_LIBRARY
+        NAMES pagedmoe_capi
+        PATHS "${KTRANSFORMERS_PAGEDMOE_ROOT}/src/target/release"
+        NO_DEFAULT_PATH
+    )
+    if(NOT EXISTS "${PAGEDMOE_CAPI_INCLUDE_DIR}/pagedmoe_c_api.h")
+        message(FATAL_ERROR "pagedmoe C API header not found at ${PAGEDMOE_CAPI_INCLUDE_DIR}. Build/update pagedmoe src first.")
+    endif()
+    if(NOT PAGEDMOE_CAPI_LIBRARY)
+        message(FATAL_ERROR "libpagedmoe_capi not found under ${KTRANSFORMERS_PAGEDMOE_ROOT}/src/target/release. Run: cargo build -p pagedmoe-capi --release --manifest-path ${KTRANSFORMERS_PAGEDMOE_ROOT}/src/Cargo.toml")
+    endif()
+    get_filename_component(PAGEDMOE_CAPI_LIBRARY_DIR "${PAGEDMOE_CAPI_LIBRARY}" DIRECTORY)
+    include_directories(${PAGEDMOE_CAPI_INCLUDE_DIR})
+    add_compile_definitions(USE_PAGEDMOE=1)
+    message(STATUS "PagedMoE enabled: include=${PAGEDMOE_CAPI_INCLUDE_DIR} lib=${PAGEDMOE_CAPI_LIBRARY}")
+endif()
 if(KTRANSFORMERS_USE_CUDA)
     include(CheckLanguage)
     check_language(CUDA)
@@ -567,12 +587,26 @@ else()
     )
 endif()
 
-include(FindPkgConfig)
-if(PKG_CONFIG_FOUND)
-    pkg_search_module(HWLOC REQUIRED IMPORTED_TARGET hwloc)
-else(PKG_CONFIG_FOUND)
-    message(FATAL_ERROR "FindHWLOC needs pkg-config program and PKG_CONFIG_PATH must contain the path to hwloc.pc file.")
-endif(PKG_CONFIG_FOUND)
+find_path(HWLOC_INCLUDE_DIR
+    NAMES hwloc.h
+    HINTS "$ENV{CONDA_PREFIX}/include"
+)
+find_library(HWLOC_LIBRARY
+    NAMES hwloc
+    HINTS "$ENV{CONDA_PREFIX}/lib"
+)
+if(HWLOC_INCLUDE_DIR AND HWLOC_LIBRARY)
+    message(STATUS "HWLOC found: include=${HWLOC_INCLUDE_DIR} library=${HWLOC_LIBRARY}")
+else()
+    include(FindPkgConfig)
+    if(PKG_CONFIG_FOUND)
+        pkg_search_module(HWLOC REQUIRED hwloc)
+        set(HWLOC_INCLUDE_DIR ${HWLOC_INCLUDE_DIRS})
+        set(HWLOC_LIBRARY ${HWLOC_LIBRARIES})
+    else()
+        message(FATAL_ERROR "HWLOC not found; install hwloc/libhwloc development files")
+    endif()
+endif()
 
 
 add_library(llamafile STATIC ${SOURCE_DIR4})
@@ -641,7 +675,13 @@ if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
     endif()
     target_compile_definitions(${PROJECT_NAME} PRIVATE CPU_USE_KML)
 endif()
-target_link_libraries(${PROJECT_NAME} PRIVATE llama PkgConfig::HWLOC OpenMP::OpenMP_CXX)
+target_include_directories(${PROJECT_NAME} PRIVATE ${HWLOC_INCLUDE_DIR})
+target_link_libraries(${PROJECT_NAME} PRIVATE llama ${HWLOC_LIBRARY} OpenMP::OpenMP_CXX)
+if(KTRANSFORMERS_USE_PAGEDMOE)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${PAGEDMOE_CAPI_LIBRARY})
+    set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY BUILD_RPATH "${PAGEDMOE_CAPI_LIBRARY_DIR}")
+    set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY INSTALL_RPATH "${PAGEDMOE_CAPI_LIBRARY_DIR}")
+endif()
 if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
     if(KTRANSFORMERS_CPU_DEBUG)
         # add_executable(convert-test ${CMAKE_CURRENT_SOURCE_DIR}/operators/kml/convert-test.cpp)
@@ -699,9 +739,17 @@ endif()
 
 
 
-find_library(NUMA_LIBRARY NAMES numa)
-if(NUMA_LIBRARY)
-    message(STATUS "NUMA library found: ${NUMA_LIBRARY} - enabling NUMA support")
+find_path(NUMA_INCLUDE_DIR
+    NAMES numa.h
+    HINTS "$ENV{CONDA_PREFIX}/include"
+)
+find_library(NUMA_LIBRARY
+    NAMES numa
+    HINTS "$ENV{CONDA_PREFIX}/lib"
+)
+if(NUMA_INCLUDE_DIR AND NUMA_LIBRARY)
+    message(STATUS "NUMA found: include=${NUMA_INCLUDE_DIR} library=${NUMA_LIBRARY}")
+    target_include_directories(${PROJECT_NAME} PRIVATE ${NUMA_INCLUDE_DIR})
     target_link_libraries(${PROJECT_NAME} PRIVATE ${NUMA_LIBRARY})
 else()
     message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")

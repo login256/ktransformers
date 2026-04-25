@@ -28,6 +28,7 @@ from .experts_base import BaseMoEWrapper, KExpertsCPUBuffer
 from .utils.amx import AMXMoEWrapper, NativeMoEWrapper
 from .utils.llamafile import LlamafileMoEWrapper
 from .utils.moe_kernel import GeneralMoEWrapper
+from .utils.pagedmoe import PagedMoeWrapper
 
 
 # Valid methods for each mode
@@ -43,6 +44,7 @@ INFERENCE_METHODS = frozenset(
         "LLAMAFILE",  # GGUF format
         "MOE_INT4",
         "MOE_INT8",  # General kernel
+        "PAGEDMOE",  # pagedmoe C ABI runtime
     ]
 )
 
@@ -318,6 +320,8 @@ def _create_inference_wrapper(
         backend_cls = LlamafileMoEWrapper
     elif method in ["MOE_INT4", "MOE_INT8"]:
         backend_cls = GeneralMoEWrapper
+    elif method == "PAGEDMOE":
+        backend_cls = PagedMoeWrapper
     else:
         # This shouldn't happen due to validation in __new__
         raise NotImplementedError(f"Unsupported inference method: {method}")

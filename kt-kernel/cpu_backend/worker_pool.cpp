@@ -418,6 +418,11 @@ void WorkerPool::init(WorkerPoolConfig config) {
   }
   printf("\n");
 
+  if (!config.create_worker_threads) {
+    printf("WorkerPool[0x%lx]: worker thread creation disabled\n", (intptr_t)this);
+    return;
+  }
+
   for (int i = 0; i < config.subpool_count; i++) {
     numa_worker_pools.push_back(nullptr);
   }

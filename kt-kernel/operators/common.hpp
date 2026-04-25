@@ -308,6 +308,15 @@ struct GeneralMOEConfig {
 
   int max_cache_depth = 1;
 
+  // pagedmoe runtime options. Zero means "use pagedmoe default/storage value".
+  size_t pagedmoe_cache_size_bytes = 0;
+  size_t pagedmoe_codebook_workers = 0;
+  size_t pagedmoe_bitplane_workers = 0;
+  size_t pagedmoe_compute_threads = 0;
+  int pagedmoe_pin_compute_workers = 0;
+  size_t pagedmoe_num_layers = 0;
+  size_t pagedmoe_num_blocks = 0;
+
   GeneralMOEConfig() {}
 
   GeneralMOEConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size)
