@@ -650,7 +650,22 @@ void bind_pagedmoe_module(py::module_& moe_module) {
                &PagedMoeBindings::ForwardBindings::cpuinfer_interface))
       .def("warm_up", &PAGEDMOE_MOE::warm_up)
       .def("load_weights", &PAGEDMOE_MOE::load_weights)
-      .def("forward", &PAGEDMOE_MOE::forward_binding);
+      .def("forward", &PAGEDMOE_MOE::forward_binding)
+      .def("reset_stats", &PAGEDMOE_MOE::reset_stats)
+      .def("stats", [](PAGEDMOE_MOE& self) {
+        auto stats = self.stats();
+        py::dict result;
+        result["token_calls"] = py::int_(stats.token_calls);
+        result["route_slots"] = py::int_(stats.route_slots);
+        result["route_unique_requests"] = py::int_(stats.route_unique_requests);
+        result["total_possible_bitplane_reads"] = py::int_(stats.total_possible_bitplane_reads);
+        result["submitted_reads"] = py::int_(stats.submitted_reads);
+        result["completed_reads"] = py::int_(stats.completed_reads);
+        result["submitted_compute_tasks"] = py::int_(stats.submitted_compute_tasks);
+        result["completed_compute_tasks"] = py::int_(stats.completed_compute_tasks);
+        result["read_job_cache_hit_rate"] = py::float_(stats.read_job_cache_hit_rate);
+        return result;
+      });
 }
 #endif
 

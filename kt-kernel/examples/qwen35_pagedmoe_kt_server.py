@@ -10,16 +10,16 @@ KT CPU MoE backend with the PAGEDMOE C ABI backend:
       -> KTEPWrapperMethod
       -> KTMoEWrapper(method="PAGEDMOE")
       -> pagedmoe_runtime_execute_batch_sum_bf16()
-
-The direct Transformers example remains in qwen35_pagedmoe_direct.py.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import numbers
 import os
 import pathlib
+import re
 import signal
 import site
 import subprocess
@@ -37,6 +37,8 @@ SGLANG_PYTHON = KTRANSFORMERS_ROOT / "third_party" / "sglang" / "python"
 KT_KERNEL_PYTHON = KTRANSFORMERS_ROOT / "kt-kernel" / "python"
 PAGEDMOE_TARGET_RELEASE = PAGEDMOE_ROOT / "src" / "target" / "release"
 LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+PAGEDMOE_STATS_PREFIX = "PagedMoe runtime stats:"
+MCQ_LABELS = ("A", "B", "C", "D")
 
 
 def build_env(args: argparse.Namespace) -> dict[str, str]:
@@ -108,6 +110,7 @@ def build_server_cmd(args: argparse.Namespace) -> list[str]:
         "--tensor-parallel-size",
         str(args.tensor_parallel_size),
         "--disable-shared-experts-fusion",
+        "--skip-server-warmup",
     ]
     if args.disable_cuda_graph:
         cmd.append("--disable-cuda-graph")
@@ -157,22 +160,30 @@ def wait_until_ready(base_url: str, proc: subprocess.Popen[Any] | None, timeout_
     raise TimeoutError(f"server did not become ready within {timeout_s}s: {last_error}")
 
 
-def prepare_prompt(args: argparse.Namespace) -> tuple[str, Any | None]:
+def load_tokenizer(args: argparse.Namespace) -> Any | None:
     try:
         from transformers import AutoTokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained(str(args.model_root), trust_remote_code=True)
-        messages = [{"role": "user", "content": args.prompt}]
-        prompt = tokenizer.apply_chat_template(
+        return AutoTokenizer.from_pretrained(str(args.model_root), trust_remote_code=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] tokenizer load failed, using raw prompts: {exc}", flush=True)
+        return None
+
+
+def apply_chat_template(tokenizer: Any | None, text: str, thinking: bool) -> str:
+    if tokenizer is None:
+        return text
+    try:
+        messages = [{"role": "user", "content": text}]
+        return tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=args.thinking,
+            enable_thinking=thinking,
         )
-        return prompt, tokenizer
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] tokenizer chat template failed, using raw prompt: {exc}", flush=True)
-        return args.prompt, None
+        return text
 
 
 def request_generate(
@@ -229,7 +240,8 @@ def extract_text_and_counts(response: Any, tokenizer: Any | None) -> tuple[str, 
 
 def run_benchmark(args: argparse.Namespace) -> None:
     base_url = f"http://{args.host}:{args.port}"
-    prompt, tokenizer = prepare_prompt(args)
+    tokenizer = load_tokenizer(args)
+    prompt = apply_chat_template(tokenizer, args.prompt, args.thinking)
     prompt_tokens = len(tokenizer.encode(prompt, add_special_tokens=False)) if tokenizer is not None else None
     print(f"[benchmark] prompt_tokens={prompt_tokens if prompt_tokens is not None else 'unknown'}", flush=True)
     start = time.perf_counter()
@@ -256,6 +268,76 @@ def run_benchmark(args: argparse.Namespace) -> None:
     )
     if args.print_output:
         print("[output]", text, flush=True)
+
+
+def build_mmlu_prompt(question: str, choices: list[str]) -> str:
+    return (
+        "Answer the following multiple choice question. "
+        "Respond with only one letter: A, B, C, or D.\n\n"
+        f"Question: {question}\n"
+        f"A. {choices[0]}\n"
+        f"B. {choices[1]}\n"
+        f"C. {choices[2]}\n"
+        f"D. {choices[3]}\n\n"
+        "Answer:"
+    )
+
+
+def extract_choice(text: str) -> str:
+    match = re.search(r"\b([ABCD])\b", text.upper())
+    return match.group(1) if match else ""
+
+
+def run_mmlu(args: argparse.Namespace) -> None:
+    from datasets import load_dataset
+
+    base_url = f"http://{args.host}:{args.port}"
+    tokenizer = load_tokenizer(args)
+    ds = load_dataset("cais/mmlu", args.mmlu_subject, split=args.mmlu_split)
+    limit = len(ds) if args.mmlu_limit <= 0 else min(args.mmlu_limit, len(ds))
+    correct = 0
+    start = time.perf_counter()
+    for idx in range(limit):
+        row = ds[idx]
+        prompt = apply_chat_template(
+            tokenizer,
+            build_mmlu_prompt(str(row["question"]), list(row["choices"])),
+            thinking=False,
+        )
+        response = request_generate(
+            base_url,
+            args.served_model_name or args.model_root.name,
+            prompt,
+            args.mmlu_max_new_tokens,
+            ignore_eos=False,
+        )
+        text, _ = extract_text_and_counts(response, tokenizer)
+        pred = extract_choice(text)
+        answer = row["answer"]
+        gold = MCQ_LABELS[int(answer)] if isinstance(answer, numbers.Integral) else str(answer).strip().upper()
+        ok = pred == gold
+        correct += int(ok)
+        print(
+            f"[mmlu] idx={idx} subject={args.mmlu_subject} pred={pred!r} gold={gold!r} ok={ok} text={text!r}",
+            flush=True,
+        )
+    elapsed = time.perf_counter() - start
+    print(
+        f"[mmlu] subject={args.mmlu_subject} split={args.mmlu_split} "
+        f"limit={limit} accuracy={correct}/{limit} elapsed_s={elapsed:.2f}",
+        flush=True,
+    )
+
+
+def print_pagedmoe_stats_from_log(log_file: pathlib.Path) -> None:
+    if not log_file.exists():
+        return
+    stats_line = None
+    for line in log_file.read_text(errors="replace").splitlines():
+        if PAGEDMOE_STATS_PREFIX in line:
+            stats_line = line
+    if stats_line is not None:
+        print("[pagedmoe]", stats_line.split(PAGEDMOE_STATS_PREFIX, 1)[1].strip(), flush=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -292,6 +374,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--thinking", action="store_true")
     parser.add_argument("--decode-steps", type=int, default=50)
     parser.add_argument("--ignore-eos", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--mmlu-subject", default=None)
+    parser.add_argument("--mmlu-split", default="test")
+    parser.add_argument("--mmlu-limit", type=int, default=0)
+    parser.add_argument("--mmlu-max-new-tokens", type=int, default=4)
     parser.add_argument("--print-output", action="store_true")
     parser.add_argument("--startup-timeout", type=float, default=1800.0)
     parser.add_argument("--log-file", type=pathlib.Path, default=pathlib.Path("/tmp/qwen35_pagedmoe_kt_server.log"))
@@ -332,7 +418,10 @@ def main() -> None:
         wait_until_ready(f"http://{args.host}:{args.port}", proc, args.startup_timeout)
         print("[server] ready", flush=True)
         if not args.server_only:
-            run_benchmark(args)
+            if args.mmlu_subject:
+                run_mmlu(args)
+            else:
+                run_benchmark(args)
     finally:
         if proc is not None and proc.poll() is None:
             proc.send_signal(signal.SIGTERM)
@@ -342,6 +431,8 @@ def main() -> None:
                 proc.kill()
         if log_fp is not None:
             log_fp.close()
+        if proc is not None and not args.server_only:
+            print_pagedmoe_stats_from_log(args.log_file)
 
 
 if __name__ == "__main__":

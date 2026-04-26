@@ -19,6 +19,7 @@ class PAGEDMOE_MOE : public MoE_Interface {
     explicit RuntimeHolder(PagedMoeRuntime* runtime) : runtime(runtime) {}
     ~RuntimeHolder() {
       if (runtime != nullptr) {
+        log_stats();
         pagedmoe_runtime_destroy(runtime);
         runtime = nullptr;
       }
@@ -27,7 +28,50 @@ class PAGEDMOE_MOE : public MoE_Interface {
     RuntimeHolder(const RuntimeHolder&) = delete;
     RuntimeHolder& operator=(const RuntimeHolder&) = delete;
 
+    void log_stats_if_needed(uint64_t added_token_calls) {
+      std::lock_guard<std::mutex> lock(stats_log_mutex);
+      token_calls_since_last_log += added_token_calls;
+      if (token_calls_since_last_log < kStatsLogIntervalTokenCalls) {
+        return;
+      }
+      token_calls_since_last_log = 0;
+      log_stats_unlocked();
+    }
+
+    void log_stats() {
+      std::lock_guard<std::mutex> lock(stats_log_mutex);
+      log_stats_unlocked();
+    }
+
     PagedMoeRuntime* runtime = nullptr;
+
+   private:
+    static constexpr uint64_t kStatsLogIntervalTokenCalls = 1000;
+
+    void log_stats_unlocked() {
+      if (runtime == nullptr) {
+        return;
+      }
+      PagedMoeRuntimeStats stats{};
+      if (pagedmoe_runtime_get_stats(runtime, &stats) != PAGEDMOE_OK || stats.token_calls == 0) {
+        return;
+      }
+      printf(
+          "PagedMoe runtime stats: token_calls=%llu route_slots=%llu route_unique_requests=%llu "
+          "total_possible_bitplane_reads=%llu submitted_reads=%llu completed_reads=%llu "
+          "submitted_compute_tasks=%llu completed_compute_tasks=%llu read_job_cache_hit_rate=%.4f\n",
+          static_cast<unsigned long long>(stats.token_calls), static_cast<unsigned long long>(stats.route_slots),
+          static_cast<unsigned long long>(stats.route_unique_requests),
+          static_cast<unsigned long long>(stats.total_possible_bitplane_reads),
+          static_cast<unsigned long long>(stats.submitted_reads),
+          static_cast<unsigned long long>(stats.completed_reads),
+          static_cast<unsigned long long>(stats.submitted_compute_tasks),
+          static_cast<unsigned long long>(stats.completed_compute_tasks), stats.read_job_cache_hit_rate);
+      fflush(stdout);
+    }
+
+    std::mutex stats_log_mutex;
+    uint64_t token_calls_since_last_log = 0;
   };
 
   static std::mutex& runtime_cache_mutex() {
@@ -122,6 +166,28 @@ class PAGEDMOE_MOE : public MoE_Interface {
     forward(1, config.num_experts_per_tok, expert_ids.data(), weights.data(), input.data(), output.data(), false);
   }
 
+  PagedMoeRuntimeStats stats() const {
+    PagedMoeRuntimeStats stats{};
+    if (runtime_holder_ == nullptr || runtime_holder_->runtime == nullptr) {
+      return stats;
+    }
+    auto status = pagedmoe_runtime_get_stats(runtime_holder_->runtime, &stats);
+    if (status != PAGEDMOE_OK) {
+      throw std::runtime_error(std::string("pagedmoe_runtime_get_stats failed: ") + pagedmoe_last_error());
+    }
+    return stats;
+  }
+
+  void reset_stats() {
+    if (runtime_holder_ == nullptr || runtime_holder_->runtime == nullptr) {
+      return;
+    }
+    auto status = pagedmoe_runtime_reset_stats(runtime_holder_->runtime);
+    if (status != PAGEDMOE_OK) {
+      throw std::runtime_error(std::string("pagedmoe_runtime_reset_stats failed: ") + pagedmoe_last_error());
+    }
+  }
+
   void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output,
                bool incremental = false) override {
     if (!loaded_ || runtime_holder_ == nullptr || runtime_holder_->runtime == nullptr) {
@@ -154,6 +220,7 @@ class PAGEDMOE_MOE : public MoE_Interface {
       throw std::runtime_error(std::string("pagedmoe_runtime_execute_batch_sum_bf16 failed: ") +
                                pagedmoe_last_error());
     }
+    runtime_holder_->log_stats_if_needed(static_cast<uint64_t>(qlen));
   }
 
   void forward_binding(intptr_t qlen_ptr, int k, intptr_t expert_ids, intptr_t weights, intptr_t input,
