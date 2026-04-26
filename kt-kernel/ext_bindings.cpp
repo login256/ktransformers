@@ -170,6 +170,100 @@ std::vector<std::vector<T*>> uint_to_void_ptr_nested(const std::vector<std::vect
         self.name = uint_to_void_ptr_nested<void>(val);                                \
       })
 
+class LinearBindings {
+ public:
+  class WarmUpBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      Linear* linear;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      CPUInfer* cpuinfer = args_->cpuinfer;
+      Linear* linear = args_->linear;
+      cpuinfer->task_queue_->enqueue([cpuinfer, linear]() { linear->warm_up(cpuinfer->backend_); });
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<Linear> linear) {
+      Args* args = new Args{nullptr, linear.get()};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+
+  class ForwardBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      Linear* linear;
+      int qlen;
+      intptr_t input;
+      intptr_t output;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      CPUInfer* cpuinfer = args_->cpuinfer;
+      Linear* linear = args_->linear;
+      int qlen = args_->qlen;
+      const void* input = reinterpret_cast<const void*>(args_->input);
+      void* output = reinterpret_cast<void*>(args_->output);
+      cpuinfer->task_queue_->enqueue(
+          [cpuinfer, linear, qlen, input, output]() { linear->forward(qlen, input, output, cpuinfer->backend_); });
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<Linear> linear, int qlen, intptr_t input,
+                                                            intptr_t output) {
+      Args* args = new Args{nullptr, linear.get(), qlen, input, output};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+};
+
+class MLPBindings {
+ public:
+  class WarmUpBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      MLP* mlp;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      CPUInfer* cpuinfer = args_->cpuinfer;
+      MLP* mlp = args_->mlp;
+      cpuinfer->task_queue_->enqueue([cpuinfer, mlp]() { mlp->warm_up(cpuinfer->backend_); });
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MLP> mlp) {
+      Args* args = new Args{nullptr, mlp.get()};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+
+  class ForwardBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      MLP* mlp;
+      int qlen;
+      intptr_t input;
+      intptr_t output;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      CPUInfer* cpuinfer = args_->cpuinfer;
+      MLP* mlp = args_->mlp;
+      int qlen = args_->qlen;
+      const void* input = reinterpret_cast<const void*>(args_->input);
+      void* output = reinterpret_cast<void*>(args_->output);
+      cpuinfer->task_queue_->enqueue(
+          [cpuinfer, mlp, qlen, input, output]() { mlp->forward(qlen, input, output, cpuinfer->backend_); });
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MLP> mlp, int qlen, intptr_t input,
+                                                            intptr_t output) {
+      Args* args = new Args{nullptr, mlp.get(), qlen, input, output};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+};
+
 template <class T>
 class MOEBindings {
  public:
@@ -589,10 +683,12 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
         return LinearConfig(hidden_size, intermediate_size, stride, group_max_len, (void*)proj, (ggml_type)proj_type,
                             (ggml_type)hidden_type);
       }));
-  // py::class_<Linear>(linear_module, "Linear")
-  //     .def(py::init<LinearConfig>())
-  //     .def("warm_up", &LinearBindings::WarmUpBindings::cpuinfer_interface)
-  //     .def("forward", &LinearBindings::ForwardBindings::cpuinfer_interface);
+  py::class_<Linear, std::shared_ptr<Linear>>(linear_module, "Linear")
+      .def(py::init<LinearConfig>())
+      .def("warm_up_task", &LinearBindings::WarmUpBindings::cpuinfer_interface)
+      .def("forward_task", &LinearBindings::ForwardBindings::cpuinfer_interface)
+      .def("warm_up", &LinearBindings::WarmUpBindings::cpuinfer_interface)
+      .def("forward", &LinearBindings::ForwardBindings::cpuinfer_interface);
 
   auto mlp_module = m.def_submodule("mlp");
   py::class_<MLPConfig>(mlp_module, "MLPConfig")
@@ -603,10 +699,12 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
                          (void*)down_proj, (ggml_type)gate_type, (ggml_type)up_type, (ggml_type)down_type,
                          (ggml_type)hidden_type);
       }));
-  // py::class_<MLP>(mlp_module, "MLP")
-  //     .def(py::init<MLPConfig>())
-  //     .def("warm_up", &MLPBindings::WarmUpBindings::cpuinfer_interface)
-  //     .def("forward", &MLPBindings::ForwardBindings::cpuinfer_interface);
+  py::class_<MLP, std::shared_ptr<MLP>>(mlp_module, "MLP")
+      .def(py::init<MLPConfig>())
+      .def("warm_up_task", &MLPBindings::WarmUpBindings::cpuinfer_interface)
+      .def("forward_task", &MLPBindings::ForwardBindings::cpuinfer_interface)
+      .def("warm_up", &MLPBindings::WarmUpBindings::cpuinfer_interface)
+      .def("forward", &MLPBindings::ForwardBindings::cpuinfer_interface);
 
   py::class_<GeneralConfig>(m, "GeneralConfig")
       .def(py::init<>())

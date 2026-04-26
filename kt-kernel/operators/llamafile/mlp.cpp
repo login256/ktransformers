@@ -51,7 +51,18 @@ void MLP::warm_up(WorkerPool* backend) {
   forward_many(1, input.data(), output.data(), backend);
 }
 
-static float act_fn(float x) { return x / (1.0f + expf(-x)); }
+static float act_fn(float x) {
+  if (!std::isfinite(x)) {
+    return x > 0.0f ? x : 0.0f;
+  }
+  if (x > 20.0f) {
+    return x;
+  }
+  if (x < -20.0f) {
+    return 0.0f;
+  }
+  return x / (1.0f + expf(-x));
+}
 
 void MLP::forward_many(int qlen, const void* input, void* output, WorkerPool* backend) {
   const void* gate_input_ptr;

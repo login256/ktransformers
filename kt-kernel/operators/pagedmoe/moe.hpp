@@ -3,31 +3,68 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "../common.hpp"
 #include "pagedmoe_c_api.h"
 
 class PAGEDMOE_MOE : public MoE_Interface {
+ private:
+  struct RuntimeHolder {
+    explicit RuntimeHolder(PagedMoeRuntime* runtime) : runtime(runtime) {}
+    ~RuntimeHolder() {
+      if (runtime != nullptr) {
+        pagedmoe_runtime_destroy(runtime);
+        runtime = nullptr;
+      }
+    }
+
+    RuntimeHolder(const RuntimeHolder&) = delete;
+    RuntimeHolder& operator=(const RuntimeHolder&) = delete;
+
+    PagedMoeRuntime* runtime = nullptr;
+  };
+
+  static std::mutex& runtime_cache_mutex() {
+    static std::mutex mutex;
+    return mutex;
+  }
+
+  static std::unordered_map<std::string, std::weak_ptr<RuntimeHolder>>& runtime_cache() {
+    static std::unordered_map<std::string, std::weak_ptr<RuntimeHolder>> cache;
+    return cache;
+  }
+
+  static std::string runtime_cache_key(const GeneralMOEConfig& config) {
+    return config.path + "|cache=" + std::to_string(config.pagedmoe_cache_size_bytes) +
+           "|codebook=" + std::to_string(config.pagedmoe_codebook_workers) +
+           "|bitplane=" + std::to_string(config.pagedmoe_bitplane_workers) +
+           "|compute=" + std::to_string(config.pagedmoe_compute_threads) +
+           "|pin=" + std::to_string(config.pagedmoe_pin_compute_workers) +
+           "|layers=" + std::to_string(config.pagedmoe_num_layers) +
+           "|experts=" + std::to_string(config.expert_num) +
+           "|hidden=" + std::to_string(config.hidden_size) +
+           "|intermediate=" + std::to_string(config.intermediate_size) +
+           "|blocks=" + std::to_string(config.pagedmoe_num_blocks);
+  }
+
  public:
   explicit PAGEDMOE_MOE(const GeneralMOEConfig& config) : config(config) {
     printf("PagedMoe MoE layer %d, storage: %s\n", config.layer_idx, config.path.c_str());
   }
 
-  ~PAGEDMOE_MOE() {
-    if (runtime_ != nullptr) {
-      pagedmoe_runtime_destroy(runtime_);
-      runtime_ = nullptr;
-    }
-  }
+  ~PAGEDMOE_MOE() = default;
 
   PAGEDMOE_MOE(const PAGEDMOE_MOE&) = delete;
   PAGEDMOE_MOE& operator=(const PAGEDMOE_MOE&) = delete;
 
   void load_weights() {
-    if (runtime_ != nullptr) {
+    if (runtime_holder_ != nullptr && runtime_holder_->runtime != nullptr) {
       loaded_ = true;
       return;
     }
@@ -35,6 +72,20 @@ class PAGEDMOE_MOE : public MoE_Interface {
       throw std::runtime_error("PagedMoe_MOE requires MOEConfig.path to point to pagedmoe storage_root");
     }
 
+    const std::string cache_key = runtime_cache_key(config);
+    std::lock_guard<std::mutex> lock(runtime_cache_mutex());
+    auto& cache = runtime_cache();
+    auto found = cache.find(cache_key);
+    if (found != cache.end()) {
+      runtime_holder_ = found->second.lock();
+      if (runtime_holder_ != nullptr && runtime_holder_->runtime != nullptr) {
+        loaded_ = true;
+        return;
+      }
+      cache.erase(found);
+    }
+
+    PagedMoeRuntime* runtime = nullptr;
     PagedMoeRuntimeConfig runtime_config{};
     runtime_config.storage_root = config.path.c_str();
     runtime_config.cache_size_bytes = config.pagedmoe_cache_size_bytes;
@@ -48,10 +99,12 @@ class PAGEDMOE_MOE : public MoE_Interface {
     runtime_config.intermediate_size = config.intermediate_size;
     runtime_config.num_blocks = config.pagedmoe_num_blocks;
 
-    auto status = pagedmoe_runtime_create(&runtime_config, &runtime_);
+    auto status = pagedmoe_runtime_create(&runtime_config, &runtime);
     if (status != PAGEDMOE_OK) {
       throw std::runtime_error(std::string("pagedmoe_runtime_create failed: ") + pagedmoe_last_error());
     }
+    runtime_holder_ = std::make_shared<RuntimeHolder>(runtime);
+    cache[cache_key] = runtime_holder_;
     loaded_ = true;
   }
 
@@ -71,7 +124,7 @@ class PAGEDMOE_MOE : public MoE_Interface {
 
   void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output,
                bool incremental = false) override {
-    if (!loaded_ || runtime_ == nullptr) {
+    if (!loaded_ || runtime_holder_ == nullptr || runtime_holder_->runtime == nullptr) {
       throw std::runtime_error("PagedMoe_MOE runtime is not loaded");
     }
     if (incremental) {
@@ -95,7 +148,7 @@ class PAGEDMOE_MOE : public MoE_Interface {
     }
 
     auto status = pagedmoe_runtime_execute_batch_sum_bf16(
-        runtime_, static_cast<size_t>(config.layer_idx), static_cast<size_t>(qlen), static_cast<size_t>(k),
+        runtime_holder_->runtime, static_cast<size_t>(config.layer_idx), static_cast<size_t>(qlen), static_cast<size_t>(k),
         route_experts, weights, reinterpret_cast<const uint16_t*>(input), reinterpret_cast<uint16_t*>(output));
     if (status != PAGEDMOE_OK) {
       throw std::runtime_error(std::string("pagedmoe_runtime_execute_batch_sum_bf16 failed: ") +
@@ -113,7 +166,7 @@ class PAGEDMOE_MOE : public MoE_Interface {
   GeneralMOEConfig config;
 
  private:
-  PagedMoeRuntime* runtime_ = nullptr;
+  std::shared_ptr<RuntimeHolder> runtime_holder_;
   bool loaded_ = false;
 };
 

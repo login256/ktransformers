@@ -20,6 +20,7 @@ Example:
 
 import os
 import sys
+import sysconfig
 from pathlib import Path
 
 
@@ -187,6 +188,14 @@ def load_extension(variant):
     import importlib.util
     import glob
 
+    def select_current_python_so(so_files):
+        ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+        if ext_suffix:
+            matching = [path for path in so_files if path.endswith(ext_suffix)]
+            if matching:
+                return sorted(matching)[0]
+        return sorted(so_files)[0]
+
     # The .so files can be named in two ways:
     # Multi-variant: _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
     # Single-variant: kt_kernel_ext.cpython-311-x86_64-linux-gnu.so
@@ -214,7 +223,7 @@ def load_extension(variant):
                     f"No .so file found for variant {variant} (tried patterns: {kt_kernel_dir}/_kt_kernel_ext_{variant}.*.so and {kt_kernel_dir}/kt_kernel_ext.*.so)"
                 )
 
-        so_file = so_files[0]
+        so_file = select_current_python_so(so_files)
 
         if os.environ.get("KT_KERNEL_DEBUG") == "1":
             print(f"[kt-kernel] Loading {variant} from: {so_file}")
