@@ -5,6 +5,7 @@ Starts the model inference server using SGLang + kt-kernel.
 """
 
 import os
+import site
 import subprocess
 import sys
 from pathlib import Path
@@ -57,6 +58,12 @@ from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
 @click.option(
     "--kt-gpu-prefill-threshold", "kt_gpu_prefill_threshold", type=int, default=None, help="GPU prefill token threshold"
 )
+@click.option("--pagedmoe-cache-size-gib", type=float, default=None, help="PagedMoE cache size in GiB")
+@click.option("--pagedmoe-cache-size-bytes", type=int, default=None, help="PagedMoE cache size in bytes")
+@click.option("--pagedmoe-codebook-workers", type=int, default=None, help="PagedMoE codebook read workers")
+@click.option("--pagedmoe-bitplane-workers", type=int, default=None, help="PagedMoE bitplane read workers")
+@click.option("--pagedmoe-compute-threads", type=int, default=None, help="PagedMoE compute worker threads")
+@click.option("--pagedmoe-pin-compute-workers", is_flag=True, default=False, help="Pin PagedMoE compute workers")
 @click.option("--attention-backend", default=None, help="Attention backend")
 @click.option("--max-total-tokens", "max_total_tokens", type=int, default=None, help="Maximum total tokens")
 @click.option("--max-running-requests", "max_running_requests", type=int, default=None, help="Maximum running requests")
@@ -95,6 +102,12 @@ def run(
     weights_path: Optional[str],
     kt_method: Optional[str],
     kt_gpu_prefill_threshold: Optional[int],
+    pagedmoe_cache_size_gib: Optional[float],
+    pagedmoe_cache_size_bytes: Optional[int],
+    pagedmoe_codebook_workers: Optional[int],
+    pagedmoe_bitplane_workers: Optional[int],
+    pagedmoe_compute_threads: Optional[int],
+    pagedmoe_pin_compute_workers: bool,
     attention_backend: Optional[str],
     max_total_tokens: Optional[int],
     max_running_requests: Optional[int],
@@ -152,6 +165,12 @@ def run(
         weights_path=weights_path_obj,
         kt_method=kt_method,
         kt_gpu_prefill_threshold=kt_gpu_prefill_threshold,
+        pagedmoe_cache_size_gib=pagedmoe_cache_size_gib,
+        pagedmoe_cache_size_bytes=pagedmoe_cache_size_bytes,
+        pagedmoe_codebook_workers=pagedmoe_codebook_workers,
+        pagedmoe_bitplane_workers=pagedmoe_bitplane_workers,
+        pagedmoe_compute_threads=pagedmoe_compute_threads,
+        pagedmoe_pin_compute_workers=pagedmoe_pin_compute_workers,
         attention_backend=attention_backend,
         max_total_tokens=max_total_tokens,
         max_running_requests=max_running_requests,
@@ -179,6 +198,12 @@ def _run_impl(
     weights_path: Optional[Path],
     kt_method: Optional[str],
     kt_gpu_prefill_threshold: Optional[int],
+    pagedmoe_cache_size_gib: Optional[float],
+    pagedmoe_cache_size_bytes: Optional[int],
+    pagedmoe_codebook_workers: Optional[int],
+    pagedmoe_bitplane_workers: Optional[int],
+    pagedmoe_compute_threads: Optional[int],
+    pagedmoe_pin_compute_workers: bool,
     attention_backend: Optional[str],
     max_total_tokens: Optional[int],
     max_running_requests: Optional[int],
@@ -193,6 +218,12 @@ def _run_impl(
     extra_cli_args: list[str],
 ) -> None:
     """Actual implementation of run command."""
+    local_ktransformers_root = Path(__file__).resolve().parents[4]
+    local_sglang_python = local_ktransformers_root / "third_party" / "sglang" / "python"
+    if local_sglang_python.exists() and str(local_sglang_python) not in sys.path:
+        sys.path.insert(0, str(local_sglang_python))
+    os.environ.setdefault("SGLANG_SRT_ONLY", "1")
+
     # Check if SGLang is installed before proceeding
     from kt_kernel.cli.utils.sglang_checker import (
         check_sglang_installation,
@@ -445,6 +476,7 @@ def _run_impl(
     # KT-kernel options
     final_kt_method = resolve(kt_method, "inference.kt_method", "AMXINT4")
     final_kt_gpu_prefill_threshold = resolve(kt_gpu_prefill_threshold, "inference.kt_gpu_prefill_token_threshold", 4096)
+    using_pagedmoe = str(final_kt_method).upper() == "PAGEDMOE"
 
     # SGLang options
     final_attention_backend = resolve(attention_backend, "inference.attention_backend", "flashinfer")
@@ -499,12 +531,46 @@ def _run_impl(
 
     # Prepare environment variables
     env = os.environ.copy()
+    env.setdefault("SGLANG_SRT_ONLY", "1")
+    python_paths = []
+    if local_sglang_python.exists():
+        python_paths.append(str(local_sglang_python))
+    local_kt_kernel_python = local_ktransformers_root / "kt-kernel" / "python"
+    if local_kt_kernel_python.exists():
+        python_paths.append(str(local_kt_kernel_python))
+    if env.get("PYTHONPATH"):
+        python_paths.append(env["PYTHONPATH"])
+    if python_paths:
+        env["PYTHONPATH"] = os.pathsep.join(python_paths)
     # Add environment variables from advanced.env
     env.update(settings.get_env_vars())
     # Add environment variables from inference.env
     inference_env = settings.get("inference.env", {})
     if isinstance(inference_env, dict):
         env.update({k: str(v) for k, v in inference_env.items()})
+    nvidia_lib_paths = []
+    for site_dir in site.getsitepackages():
+        nvidia_dir = Path(site_dir) / "nvidia"
+        if nvidia_dir.exists():
+            nvidia_lib_paths.extend(str(path) for path in nvidia_dir.glob("*/lib"))
+    if nvidia_lib_paths:
+        existing_ld_library_path = env.get("LD_LIBRARY_PATH")
+        if existing_ld_library_path:
+            nvidia_lib_paths.append(existing_ld_library_path)
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(nvidia_lib_paths)
+    if using_pagedmoe:
+        if pagedmoe_cache_size_gib is not None:
+            env["PAGEDMOE_CACHE_SIZE_GIB"] = str(pagedmoe_cache_size_gib)
+        if pagedmoe_cache_size_bytes is not None:
+            env["PAGEDMOE_CACHE_SIZE_BYTES"] = str(pagedmoe_cache_size_bytes)
+        if pagedmoe_codebook_workers is not None:
+            env["PAGEDMOE_CODEBOOK_WORKERS"] = str(pagedmoe_codebook_workers)
+        if pagedmoe_bitplane_workers is not None:
+            env["PAGEDMOE_BITPLANE_WORKERS"] = str(pagedmoe_bitplane_workers)
+        if pagedmoe_compute_threads is not None:
+            env["PAGEDMOE_COMPUTE_THREADS"] = str(pagedmoe_compute_threads)
+        if pagedmoe_pin_compute_workers:
+            env["PAGEDMOE_PIN_COMPUTE_WORKERS"] = "1"
 
     # Step 5: Show configuration summary
     console.print()
@@ -526,6 +592,14 @@ def _run_impl(
     console.print(f"  Tensor Parallel: [cyan]{final_tensor_parallel_size}[/cyan]")
     console.print(f"  Method: [cyan]{final_kt_method}[/cyan]")
     console.print(f"  Attention: [cyan]{final_attention_backend}[/cyan]")
+    if using_pagedmoe:
+        console.print(f"  PagedMoE cache GiB: [cyan]{env.get('PAGEDMOE_CACHE_SIZE_GIB', 'storage/default')}[/cyan]")
+        console.print(
+            "  PagedMoE workers: "
+            f"[cyan]codebook={env.get('PAGEDMOE_CODEBOOK_WORKERS', 'default')} "
+            f"bitplane={env.get('PAGEDMOE_BITPLANE_WORKERS', 'default')} "
+            f"compute={env.get('PAGEDMOE_COMPUTE_THREADS', 'kt-cpuinfer')}[/cyan]"
+        )
 
     # Weights info
     if resolved_weights_path:
@@ -650,9 +724,10 @@ def _build_sglang_command(
                 kt_method,
                 "--kt-gpu-prefill-token-threshold",
                 str(kt_gpu_prefill_threshold),
-                "--kt-enable-dynamic-expert-update",  # Enable dynamic expert updates
             ]
         )
+        if str(kt_method).upper() != "PAGEDMOE":
+            cmd.append("--kt-enable-dynamic-expert-update")
         if kt_numa_nodes is not None:
             cmd.extend(["--kt-numa-nodes", *map(str, kt_numa_nodes)])
 
@@ -686,6 +761,8 @@ def _build_sglang_command(
     # Add performance flags
     if disable_shared_experts_fusion:
         cmd.append("--disable-shared-experts-fusion")
+    if str(kt_method).upper() == "PAGEDMOE":
+        cmd.append("--disable-cuda-graph")
 
     # Add FP8 backend if using FP8 method
     if "FP8" in kt_method.upper():
