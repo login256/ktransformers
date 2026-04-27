@@ -114,6 +114,8 @@ def build_server_cmd(args: argparse.Namespace) -> list[str]:
     ]
     if args.disable_cuda_graph:
         cmd.append("--disable-cuda-graph")
+    if args.random_seed is not None:
+        cmd.extend(["--random-seed", str(args.random_seed)])
     if args.enable_p2p_check:
         cmd.append("--enable-p2p-check")
     if args.language_only:
@@ -367,6 +369,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-total-tokens", type=int, default=4096)
     parser.add_argument("--mem-fraction-static", type=float, default=0.90)
     parser.add_argument("--watchdog-timeout", type=int, default=3000)
+    parser.add_argument("--random-seed", type=int, default=None)
     parser.add_argument("--enable-p2p-check", action="store_true")
     parser.add_argument("--language-only", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--disable-cuda-graph", action=argparse.BooleanOptionalAction, default=True)
@@ -380,6 +383,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mmlu-max-new-tokens", type=int, default=4)
     parser.add_argument("--print-output", action="store_true")
     parser.add_argument("--startup-timeout", type=float, default=1800.0)
+    parser.add_argument(
+        "--shutdown-signal",
+        choices=("SIGTERM", "SIGINT"),
+        default="SIGTERM",
+        help="Signal sent to a launched SGLang server after the benchmark finishes.",
+    )
+    parser.add_argument("--shutdown-timeout", type=float, default=60.0)
     parser.add_argument("--log-file", type=pathlib.Path, default=pathlib.Path("/tmp/qwen35_pagedmoe_kt_server.log"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--server-only", action="store_true")
@@ -424,10 +434,13 @@ def main() -> None:
                 run_benchmark(args)
     finally:
         if proc is not None and proc.poll() is None:
-            proc.send_signal(signal.SIGTERM)
+            shutdown_signal = getattr(signal, args.shutdown_signal)
+            print(f"[server] stopping with {args.shutdown_signal}", flush=True)
+            proc.send_signal(shutdown_signal)
             try:
-                proc.wait(timeout=30)
+                proc.wait(timeout=args.shutdown_timeout)
             except subprocess.TimeoutExpired:
+                print("[server] graceful stop timed out; killing server", flush=True)
                 proc.kill()
         if log_fp is not None:
             log_fp.close()
