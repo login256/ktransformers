@@ -269,7 +269,9 @@ def run_benchmark(args: argparse.Namespace) -> None:
         flush=True,
     )
     if args.print_output:
-        print("[output]", text, flush=True)
+        print("[output-begin]", flush=True)
+        print(text, flush=True)
+        print("[output-end]", flush=True)
 
 
 def build_mmlu_prompt(question: str, choices: list[str]) -> str:
@@ -381,7 +383,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mmlu-split", default="test")
     parser.add_argument("--mmlu-limit", type=int, default=0)
     parser.add_argument("--mmlu-max-new-tokens", type=int, default=4)
-    parser.add_argument("--print-output", action="store_true")
+    parser.add_argument("--print-output", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--startup-timeout", type=float, default=1800.0)
     parser.add_argument(
         "--shutdown-signal",
