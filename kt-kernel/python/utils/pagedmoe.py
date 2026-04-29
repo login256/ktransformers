@@ -95,7 +95,9 @@ class PagedMoeWrapper(BaseMoEWrapper):
         if not _HAS_PAGEDMOE_SUPPORT:
             raise RuntimeError(
                 "PagedMoE backend not available. Rebuild kt_kernel_ext with "
-                "CPUINFER_ENABLE_PAGEDMOE=ON and CPUINFER_PAGEDMOE_ROOT=/path/to/pagedmoe."
+                "PagedMoE enabled; set CPUINFER_ENABLE_PAGEDMOE=OFF only when "
+                "you intentionally build without it. If pagedmoe is outside the "
+                "default repo layout, set CPUINFER_PAGEDMOE_ROOT=/path/to/pagedmoe."
             )
         if cpu_save:
             raise ValueError("PAGEDMOE does not support KTransformers cpu_save weight conversion")

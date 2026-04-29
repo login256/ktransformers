@@ -25,7 +25,7 @@ option(KTRANSFORMERS_CPU_MLA "ktransformers: CPU use MLA" OFF)
 option(KTRANSFORMERS_CPU_MOE_KERNEL "ktransformers: CPU use moe kernel" OFF)
 option(KTRANSFORMERS_CPU_MOE_AMD "ktransformers: CPU use moe kernel for amd" OFF)
 option(KTRANSFORMERS_ENABLE_CPPTRACE "Enable native crash tracing in kt-kernel" OFF)
-option(KTRANSFORMERS_USE_PAGEDMOE "ktransformers: enable pagedmoe C ABI MoE backend" OFF)
+option(KTRANSFORMERS_USE_PAGEDMOE "ktransformers: enable pagedmoe C ABI MoE backend" ON)
 set(KTRANSFORMERS_PAGEDMOE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." CACHE PATH "Path to pagedmoe repository root")
 # LTO control
 option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
