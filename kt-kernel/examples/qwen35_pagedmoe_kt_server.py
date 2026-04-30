@@ -391,12 +391,10 @@ def extract_choice(text: str) -> str:
     return match.group(1) if match else ""
 
 
-def run_mmlu(args: argparse.Namespace) -> None:
+def run_mmlu_subject(args: argparse.Namespace, base_url: str, tokenizer: Any | None, subject: str) -> None:
     from datasets import load_dataset
 
-    base_url = f"http://{args.host}:{args.port}"
-    tokenizer = load_tokenizer(args)
-    ds = load_dataset("cais/mmlu", args.mmlu_subject, split=args.mmlu_split)
+    ds = load_dataset("cais/mmlu", subject, split=args.mmlu_split)
     limit = len(ds) if args.mmlu_limit <= 0 else min(args.mmlu_limit, len(ds))
     correct = 0
     start = time.perf_counter()
@@ -421,15 +419,26 @@ def run_mmlu(args: argparse.Namespace) -> None:
         ok = pred == gold
         correct += int(ok)
         print(
-            f"[mmlu] idx={idx} subject={args.mmlu_subject} pred={pred!r} gold={gold!r} ok={ok} text={text!r}",
+            f"[mmlu] idx={idx} subject={subject} pred={pred!r} gold={gold!r} ok={ok} text={text!r}",
             flush=True,
         )
     elapsed = time.perf_counter() - start
     print(
-        f"[mmlu] subject={args.mmlu_subject} split={args.mmlu_split} "
+        f"[mmlu] subject={subject} split={args.mmlu_split} "
         f"limit={limit} accuracy={correct}/{limit} elapsed_s={elapsed:.2f}",
         flush=True,
     )
+
+
+def run_mmlu(args: argparse.Namespace) -> None:
+    subjects = args.mmlu_subject
+    if isinstance(subjects, str):
+        subjects = [subjects]
+
+    base_url = f"http://{args.host}:{args.port}"
+    tokenizer = load_tokenizer(args)
+    for subject in subjects:
+        run_mmlu_subject(args, base_url, tokenizer, subject)
 
 
 def print_pagedmoe_stats_from_log(log_file: pathlib.Path) -> None:
@@ -478,7 +487,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--thinking", action="store_true")
     parser.add_argument("--decode-steps", type=int, default=50)
     parser.add_argument("--ignore-eos", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--mmlu-subject", default=None)
+    parser.add_argument("--mmlu-subject", action="append", default=None)
     parser.add_argument("--mmlu-split", default="test")
     parser.add_argument("--mmlu-limit", type=int, default=0)
     parser.add_argument("--mmlu-max-new-tokens", type=int, default=4)
