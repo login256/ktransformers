@@ -15,6 +15,7 @@ KT CPU MoE backend with the PAGEDMOE C ABI backend:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import numbers
 import os
@@ -39,6 +40,20 @@ PAGEDMOE_TARGET_RELEASE = PAGEDMOE_ROOT / "src" / "target" / "release"
 LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 PAGEDMOE_STATS_PREFIX = "PagedMoe runtime stats:"
 MCQ_LABELS = ("A", "B", "C", "D")
+LOG_TS_PATTERN = r"\[(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?: [^\]]*)?\]"
+PREFILL_LOG_RE = re.compile(
+    LOG_TS_PATTERN
+    + r".*Prefill batch(?: \[\d+\])?,\s+"
+    + r"#new-seq:\s*(?P<new_seq>\d+),\s+"
+    + r"#new-token:\s*(?P<new_token>\d+),\s+"
+    + r"#cached-token:\s*(?P<cached_token>\d+),"
+)
+DECODE_LOG_RE = re.compile(
+    LOG_TS_PATTERN
+    + r".*Decode batch(?: \[\d+\])?,.*?"
+    + r"#(?:full )?token:\s*(?P<decode_token>\d+),.*?"
+    + r"gen throughput \(token/s\):\s*(?P<gen_throughput>[0-9.]+)"
+)
 
 
 def build_env(args: argparse.Namespace) -> dict[str, str]:
@@ -238,6 +253,90 @@ def extract_text_and_counts(response: Any, tokenizer: Any | None) -> tuple[str, 
     if tokenizer is not None:
         return text, len(tokenizer.encode(text, add_special_tokens=False))
     return text, None
+
+
+def parse_server_decode_stats(log_file: pathlib.Path) -> dict[str, Any] | None:
+    if not log_file.exists():
+        return None
+
+    pending_prefill: dict[str, Any] | None = None
+    active_segment: dict[str, Any] | None = None
+    last_segment: dict[str, Any] | None = None
+    total_decode_log_lines = 0
+
+    with log_file.open(encoding="utf-8", errors="replace") as log:
+        for line in log:
+            prefill_match = PREFILL_LOG_RE.search(line)
+            if prefill_match:
+                prefill_ts = datetime.datetime.strptime(
+                    prefill_match.group("ts"), "%Y-%m-%d %H:%M:%S"
+                )
+                pending_prefill = {
+                    "prefill_ts": prefill_ts,
+                    "prefill_tokens": int(prefill_match.group("new_token"))
+                    + int(prefill_match.group("cached_token")),
+                }
+                active_segment = None
+                continue
+
+            decode_match = DECODE_LOG_RE.search(line)
+            if not decode_match:
+                continue
+
+            total_decode_log_lines += 1
+            if pending_prefill is None:
+                continue
+
+            if active_segment is None:
+                active_segment = {
+                    **pending_prefill,
+                    "decode_log_lines": 0,
+                }
+
+            active_segment["decode_log_lines"] += 1
+            active_segment["last_decode_ts"] = datetime.datetime.strptime(
+                decode_match.group("ts"), "%Y-%m-%d %H:%M:%S"
+            )
+            active_segment["last_decode_tokens"] = int(decode_match.group("decode_token"))
+            last_segment = active_segment
+
+    if last_segment is None:
+        return None
+
+    decode_tokens = last_segment["last_decode_tokens"] - last_segment["prefill_tokens"]
+    decode_elapsed_s = (
+        last_segment["last_decode_ts"] - last_segment["prefill_ts"]
+    ).total_seconds()
+    if decode_tokens <= 0 or decode_elapsed_s <= 0:
+        return None
+
+    return {
+        **last_segment,
+        "total_decode_log_lines": total_decode_log_lines,
+        "decode_tokens": decode_tokens,
+        "decode_elapsed_s": decode_elapsed_s,
+        "decode_token_per_s": decode_tokens / decode_elapsed_s,
+    }
+
+
+def print_decode_stats_from_log(log_file: pathlib.Path) -> None:
+    stats = parse_server_decode_stats(log_file)
+    if stats is None:
+        return
+
+    print(
+        "[benchmark] "
+        f"decode_log_lines={stats['decode_log_lines']} "
+        f"decode_log_total_lines={stats['total_decode_log_lines']} "
+        f"decode_log_prefill_ts={stats['prefill_ts'].isoformat()} "
+        f"decode_log_last_ts={stats['last_decode_ts'].isoformat()} "
+        f"decode_log_prefill_tokens={stats['prefill_tokens']} "
+        f"decode_log_last_tokens={stats['last_decode_tokens']} "
+        f"decode_log_tokens_used={stats['decode_tokens']} "
+        f"decode_log_elapsed_s={stats['decode_elapsed_s']:.4f} "
+        f"decode_token_per_s_from_log={stats['decode_token_per_s']:.4f}",
+        flush=True,
+    )
 
 
 def run_benchmark(args: argparse.Namespace) -> None:
@@ -447,6 +546,7 @@ def main() -> None:
         if log_fp is not None:
             log_fp.close()
         if proc is not None and not args.server_only:
+            print_decode_stats_from_log(args.log_file)
             print_pagedmoe_stats_from_log(args.log_file)
 
 
