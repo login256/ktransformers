@@ -789,60 +789,75 @@ class OnlineQuantConverter(ConverterBase):
             if self.input_type not in ["bf16", "fp16"]:
                 raise ValueError(f"Fused path currently supports bf16/fp16 only, got input_type={self.input_type}")
 
-            proj_set = set()
             prefix = f"model.layers.{layer_idx}.mlp.experts."
+            fused_keys = []
             for key in self.tensor_file_map.keys():
                 if key.startswith(prefix):
-                    parts = key.split(".")
-                    if len(parts) >= 6:
-                        proj_set.add(parts[5])
+                    fused_keys.append(key.removeprefix(prefix))
 
-            if not proj_set:
+            if not fused_keys:
                 raise ValueError(f"[Fused] No fused MoE experts found for layer {layer_idx} under 'model.layers'")
 
-            projs = sorted(proj_set)
-            print(f"  [Fused] layer {layer_idx} fused proj keys: {projs}")
-            if len(projs) < 2:
-                raise ValueError(
-                    f"[Fused] Expect at least 2 fused tensors (down & gate_up) in layer {layer_idx}, got {len(projs)}"
-                )
+            print(f"  [Fused] layer {layer_idx} fused proj keys: {sorted(fused_keys)}")
 
-            fused_tensors = []
-            for p in projs:
-                key = f"model.layers.{layer_idx}.mlp.experts.{p}"
+            def _load_fused_tensor(proj_name: str) -> torch.Tensor:
+                key = f"{prefix}{proj_name}"
                 if key not in self.tensor_file_map:
-                    raise KeyError(f"[Fused] Missing fused tensor {key} for layer {layer_idx}")
-                w = self._load_tensor(key)
+                    raise KeyError(
+                        f"[Fused] Missing fused tensor {key} for layer {layer_idx}; "
+                        f"available fused keys: {sorted(fused_keys)}"
+                    )
+                tensor = self._load_tensor(key)
                 if self.input_type == "fp16":
-                    w = w.to(torch.bfloat16)
-                print(f"    [Fused] tensor {p} shape: {tuple(w.shape)}")
-                fused_tensors.append(w)
+                    tensor = tensor.to(torch.bfloat16)
+                print(f"    [Fused] tensor {proj_name} shape: {tuple(tensor.shape)}")
+                return tensor
 
-            #   fused_tensors[0] : down-like, [E, I, H]
-            #   fused_tensors[1] : gate_up-like, [E, H, 2I]
-            down_fused = fused_tensors[0]
-            gate_up_fused = fused_tensors[1]
+            gate_up_fused = _load_fused_tensor("gate_up_proj")
+            down_fused = _load_fused_tensor("down_proj")
 
-            #    gate_up_fused: [E, H, 2I] -> [E, 2I, H] -> gate / up
             if gate_up_fused.dim() != 3:
                 raise ValueError(
                     f"[Fused] Expect gate_up fused tensor to be 3D, got shape {tuple(gate_up_fused.shape)}"
                 )
-            E, H, twoI = gate_up_fused.shape
-            if twoI % 2 != 0:
-                raise ValueError(f"[Fused] gate_up last dim (2I) not even: {twoI}")
-            I = twoI // 2
-
-            gate_up_T = gate_up_fused.transpose(1, 2).contiguous()  # [E, 2I, H]
-            gate_proj = gate_up_T[:, :I, :]  # [E, I, H]
-            up_proj = gate_up_T[:, I:, :]  # [E, I, H]
-
             if down_fused.dim() != 3:
                 raise ValueError(f"[Fused] Expect down fused tensor to be 3D, got shape {tuple(down_fused.shape)}")
-            if down_fused.shape[0] != E:
-                raise ValueError(f"[Fused] down_fused expert dim mismatch: {down_fused.shape[0]} vs gate_up {E}")
-            down_proj = down_fused.transpose(1, 2).contiguous()  # [E, H, I]
-            del fused_tensors
+
+            expected_e = self.num_experts
+            expected_h = self.hidden_size
+            expected_i = self.moe_intermediate_size
+
+            if gate_up_fused.shape == (expected_e, 2 * expected_i, expected_h):
+                # Qwen3.5 packed format: [E, 2I, H].
+                gate_up = gate_up_fused.contiguous()
+            elif gate_up_fused.shape == (expected_e, expected_h, 2 * expected_i):
+                # Some fused Linear implementations store [E, H, 2I].
+                gate_up = gate_up_fused.transpose(1, 2).contiguous()
+            else:
+                raise ValueError(
+                    f"[Fused] Unexpected gate_up_proj shape for layer {layer_idx}: "
+                    f"{tuple(gate_up_fused.shape)}; expected either "
+                    f"({expected_e}, {2 * expected_i}, {expected_h}) for Qwen3.5 packed format "
+                    f"or ({expected_e}, {expected_h}, {2 * expected_i})"
+                )
+
+            gate_proj = gate_up[:, :expected_i, :].contiguous()  # [E, I, H]
+            up_proj = gate_up[:, expected_i:, :].contiguous()  # [E, I, H]
+
+            if down_fused.shape == (expected_e, expected_h, expected_i):
+                # Qwen3.5 packed format: [E, H, I].
+                down_proj = down_fused.contiguous()
+            elif down_fused.shape == (expected_e, expected_i, expected_h):
+                down_proj = down_fused.transpose(1, 2).contiguous()
+            else:
+                raise ValueError(
+                    f"[Fused] Unexpected down_proj shape for layer {layer_idx}: "
+                    f"{tuple(down_fused.shape)}; expected either "
+                    f"({expected_e}, {expected_h}, {expected_i}) for Qwen3.5 packed format "
+                    f"or ({expected_e}, {expected_i}, {expected_h})"
+                )
+
+            del gate_up
             del gate_up_fused
             del down_fused
         else:
