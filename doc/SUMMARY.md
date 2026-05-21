@@ -18,6 +18,7 @@
 <!-- # For Developer
 - [Makefile Usage](en/makefile_usage.md) -->
 - [kt-kernel part](en/kt-kernel/README.md)
+  - [Quickstart: SGLang + AMXINT8 / AMXINT4](en/kt-kernel/quickstart.md)
   - [kt-cli](en/kt-kernel/kt-cli.md)
   - [AVX2 Backend Tutorial](en/kt-kernel/AVX2-Tutorial.md)
   - [AVX2 后端教程（中文）](zh/AVX2-Tutorial_zh.md)
