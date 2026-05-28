@@ -38,6 +38,7 @@ SGLANG_PYTHON = KTRANSFORMERS_ROOT / "third_party" / "sglang" / "python"
 KT_KERNEL_PYTHON = KTRANSFORMERS_ROOT / "kt-kernel" / "python"
 PAGEDMOE_TARGET_RELEASE = PAGEDMOE_ROOT / "src" / "target" / "release"
 LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+DEFAULT_LANGUAGE_ONLY_ENCODER_URL = "http://127.0.0.1:65535"
 PAGEDMOE_STATS_PREFIX = "PagedMoe runtime stats:"
 MCQ_LABELS = ("A", "B", "C", "D")
 LOG_TS_PATTERN = r"\[(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?: [^\]]*)?\]"
@@ -54,6 +55,10 @@ DECODE_LOG_RE = re.compile(
     + r"#(?:full )?token:\s*(?P<decode_token>\d+),.*?"
     + r"gen throughput \(token/s\):\s*(?P<gen_throughput>[0-9.]+)"
 )
+
+
+def has_sglang_arg(extra_args: list[str], name: str) -> bool:
+    return any(arg == name or arg.startswith(f"{name}=") for arg in extra_args)
 
 
 def build_env(args: argparse.Namespace) -> dict[str, str]:
@@ -135,6 +140,8 @@ def build_server_cmd(args: argparse.Namespace) -> list[str]:
         cmd.append("--enable-p2p-check")
     if args.language_only:
         cmd.append("--language-only")
+        if not has_sglang_arg(args.extra_sglang_args, "--encoder-urls"):
+            cmd.extend(["--encoder-urls", DEFAULT_LANGUAGE_ONLY_ENCODER_URL])
     if args.served_model_name:
         cmd.extend(["--served-model-name", args.served_model_name])
     if args.extra_sglang_args:
