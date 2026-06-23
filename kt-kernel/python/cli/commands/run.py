@@ -54,6 +54,7 @@ from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
 )
 @click.option("--model-path", type=click.Path(), default=None, help="Custom model path")
 @click.option("--weights-path", type=click.Path(), default=None, help="Custom quantized weights path")
+@click.option("--pagedmoe-storage-root", type=click.Path(), default=None, help="PagedMoE storage root")
 @click.option("--kt-method", default=None, help="KT quantization method")
 @click.option(
     "--kt-gpu-prefill-threshold", "kt_gpu_prefill_threshold", type=int, default=None, help="GPU prefill token threshold"
@@ -100,6 +101,7 @@ def run(
     tensor_parallel_size: Optional[int],
     model_path: Optional[str],
     weights_path: Optional[str],
+    pagedmoe_storage_root: Optional[str],
     kt_method: Optional[str],
     kt_gpu_prefill_threshold: Optional[int],
     pagedmoe_cache_size_gib: Optional[float],
@@ -144,6 +146,7 @@ def run(
     # Convert Path objects from click
     model_path_obj = Path(model_path) if model_path else None
     weights_path_obj = Path(weights_path) if weights_path else None
+    pagedmoe_storage_root_obj = Path(pagedmoe_storage_root) if pagedmoe_storage_root else None
 
     # Get extra args that weren't parsed (unknown options)
     # click stores these in ctx.args when ignore_unknown_options=True
@@ -163,6 +166,7 @@ def run(
         tensor_parallel_size=tensor_parallel_size,
         model_path=model_path_obj,
         weights_path=weights_path_obj,
+        pagedmoe_storage_root=pagedmoe_storage_root_obj,
         kt_method=kt_method,
         kt_gpu_prefill_threshold=kt_gpu_prefill_threshold,
         pagedmoe_cache_size_gib=pagedmoe_cache_size_gib,
@@ -196,6 +200,7 @@ def _run_impl(
     tensor_parallel_size: Optional[int],
     model_path: Optional[Path],
     weights_path: Optional[Path],
+    pagedmoe_storage_root: Optional[Path],
     kt_method: Optional[str],
     kt_gpu_prefill_threshold: Optional[int],
     pagedmoe_cache_size_gib: Optional[float],
@@ -251,6 +256,7 @@ def _run_impl(
 
     settings = get_settings()
     user_registry = UserModelRegistry()
+    resolved_pagedmoe_storage_root = None
 
     # Check if we should use interactive mode
     # Interactive mode triggers when:
@@ -420,6 +426,7 @@ def _run_impl(
 
         # Step 3: Check quantized weights (only if explicitly requested)
         resolved_weights_path = None
+        resolved_pagedmoe_storage_root = None
 
         # Only use quantized weights if explicitly specified by user
         if weights_path is not None:
@@ -477,6 +484,19 @@ def _run_impl(
     final_kt_method = resolve(kt_method, "inference.kt_method", "AMXINT4")
     final_kt_gpu_prefill_threshold = resolve(kt_gpu_prefill_threshold, "inference.kt_gpu_prefill_token_threshold", 4096)
     using_pagedmoe = str(final_kt_method).upper() == "PAGEDMOE"
+    if using_pagedmoe:
+        if pagedmoe_storage_root is not None:
+            resolved_pagedmoe_storage_root = pagedmoe_storage_root
+        elif settings.get("inference.pagedmoe_storage_root"):
+            resolved_pagedmoe_storage_root = Path(settings.get("inference.pagedmoe_storage_root"))
+        elif resolved_weights_path is not None:
+            resolved_pagedmoe_storage_root = resolved_weights_path
+        else:
+            print_error("PagedMoE requires --pagedmoe-storage-root (legacy fallback: --weights-path)")
+            raise typer.Exit(1)
+        if not resolved_pagedmoe_storage_root.exists():
+            print_error(f"PagedMoE storage root does not exist: {resolved_pagedmoe_storage_root}")
+            raise typer.Exit(1)
 
     # SGLang options
     final_attention_backend = resolve(attention_backend, "inference.attention_backend", "flashinfer")
@@ -505,6 +525,7 @@ def _run_impl(
     cmd = _build_sglang_command(
         model_path=resolved_model_path,
         weights_path=resolved_weights_path,
+        pagedmoe_storage_root=resolved_pagedmoe_storage_root,
         host=final_host,
         port=final_port,
         gpu_experts=final_gpu_experts,
@@ -593,6 +614,7 @@ def _run_impl(
     console.print(f"  Method: [cyan]{final_kt_method}[/cyan]")
     console.print(f"  Attention: [cyan]{final_attention_backend}[/cyan]")
     if using_pagedmoe:
+        console.print(f"  PagedMoE storage: [yellow]{resolved_pagedmoe_storage_root}[/yellow]")
         console.print(f"  PagedMoE cache GiB: [cyan]{env.get('PAGEDMOE_CACHE_SIZE_GIB', 'storage/default')}[/cyan]")
         console.print(
             "  PagedMoE workers: "
@@ -655,6 +677,7 @@ def _run_impl(
 def _build_sglang_command(
     model_path: Path,
     weights_path: Optional[Path],
+    pagedmoe_storage_root: Optional[Path],
     host: str,
     port: int,
     gpu_experts: int,
@@ -698,7 +721,7 @@ def _build_sglang_command(
     use_kt_kernel = False
 
     # Check if we should use kt-kernel
-    if weights_path:
+    if weights_path or (str(kt_method).upper() == "PAGEDMOE" and pagedmoe_storage_root):
         # Quantized model - always use kt-kernel
         use_kt_kernel = True
     elif cpu_threads > 0 or gpu_experts > 1:
@@ -706,13 +729,18 @@ def _build_sglang_command(
         use_kt_kernel = True
 
     if use_kt_kernel:
-        # Add kt-weight-path: use quantized weights if available, otherwise use model path
-        weight_path_to_use = weights_path if weights_path else model_path
+        # PagedMoE has its own manifest-backed storage root. Other KT methods use quantized weights.
+        if str(kt_method).upper() == "PAGEDMOE":
+            weight_path_arg = "--pagedmoe-storage-root"
+            weight_path_to_use = pagedmoe_storage_root
+        else:
+            weight_path_arg = "--kt-weight-path"
+            weight_path_to_use = weights_path if weights_path else model_path
 
         # Add kt-kernel configuration
         cmd.extend(
             [
-                "--kt-weight-path",
+                weight_path_arg,
                 str(weight_path_to_use),
                 "--kt-cpuinfer",
                 str(cpu_threads),
